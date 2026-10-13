@@ -75,6 +75,7 @@ def gen_constitution(
     n_traits: int = 10,
     n_questions: int = 5,
     max_attempts: int = 8,
+    max_new_tokens: int = 12288,
 ) -> None:
     outpath = f"{CONSTITUTION_PATH}/hand-written/{constitution}.txt"
     if os.path.exists(outpath):
@@ -83,7 +84,9 @@ def gen_constitution(
 
     from vllm import SamplingParams
     from character.distillation.client import load_vllm_client
-    args, llm, tokenizer = load_vllm_client(model, api, temperature=0.7, top_p=0.95, max_new_tokens=6144)
+    # a thinking generator can draft the whole constitution inside its reasoning
+    # before answering; leave room for both (the served context must cover it)
+    args, llm, tokenizer = load_vllm_client(model, api, temperature=0.7, top_p=0.95, max_new_tokens=max_new_tokens)
     sampling_params = SamplingParams(
         repetition_penalty=1.0,
         temperature=args.temperature,
@@ -120,8 +123,9 @@ if __name__ == "__main__":
     parser.add_argument("--api", type=str, required=True, help="Path to host file for remote vLLM server")
     parser.add_argument("--n_traits", type=int, required=False, default=10)
     parser.add_argument("--n_questions", type=int, required=False, default=5)
+    parser.add_argument("--max_new_tokens", type=int, required=False, default=12288, help="Generation cap per attempt, reasoning included")
     args = parser.parse_args()
     description = args.description
     if args.description_file:
         with open(args.description_file) as f: description = f.read()
-    gen_constitution(args.constitution, description, args.model, args.api, args.n_traits, args.n_questions)
+    gen_constitution(args.constitution, description, args.model, args.api, args.n_traits, args.n_questions, max_new_tokens=args.max_new_tokens)
