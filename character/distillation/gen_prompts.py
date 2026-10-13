@@ -101,7 +101,7 @@ def gen_questions(
     # === PREPARE THE MODEL ===
     if api:
         from character.distillation.client import load_vllm_client
-        args, llm, tokenizer = load_vllm_client(model, api)
+        args, llm, tokenizer = load_vllm_client(model, api, temperature=0.7, top_p=0.95)
     else:
         # gen inference args
         args = gen_args(model, temperature=0.7, top_p=0.95)
@@ -147,7 +147,11 @@ def gen_questions(
             priming += "".join([f"{idx+1}. {q}\n" for idx, q in enumerate(questions)])
             messages.append({"role": "assistant", "content": priming})
             prompt = tokenizer.apply_chat_template(messages, tokenize=False)
-            prompt = prompt[:-len(tokenizer.eos_token)]
+            if tokenizer.eos_token and prompt.endswith(tokenizer.eos_token):
+                prompt = prompt[:-len(tokenizer.eos_token)]
+            else:
+                # templates that close the turn with more than the eos token (ChatML)
+                prompt = tokenizer.apply_chat_template(messages, tokenize=False, continue_final_message=True)
             prompts.append(prompt)
         # generate responses 
         outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
@@ -180,7 +184,8 @@ def gen_questions(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--constitution", type=str, required=True)
+    parser.add_argument("--model", type=str, required=False, default="llama-3.3-70b-it")
     parser.add_argument("--api", type=str, required=False, default=None, help="Path to host file for remote vLLM server")
     parser.add_argument("--n_additional", type=int, required=False, default=45, help="Generated questions per trait, on top of the seed questions (50 total -> 45)")
     args = parser.parse_args()
-    gen_questions(args.constitution, api=args.api, n_additional=args.n_additional)
+    gen_questions(args.constitution, model=args.model, api=args.api, n_additional=args.n_additional)

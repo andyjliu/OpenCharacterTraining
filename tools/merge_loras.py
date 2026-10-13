@@ -11,7 +11,7 @@ base_model_names = {
     "gemma-3-4b-it": "google/gemma-3-4b-it",
 }
 
-def main(model_name, constitution):
+def main(model_name, constitution, sft_dir_name="test", weights=(1.0, 0.25)):
     if constitution:
         current_constitutions = [constitution]
     else:
@@ -35,10 +35,10 @@ def main(model_name, constitution):
 
         # load each lora adapter
         model = PeftModel.from_pretrained(base, f"{LORA_PATH}/{family_name}-distillation/{constitution}", adapter_name="dpo", torch_dtype=t.bfloat16)
-        _     = model.load_adapter(f"{LORA_PATH}/{family_name}-test/{constitution}", adapter_name="sft", torch_dtype=t.bfloat16)
+        _     = model.load_adapter(f"{LORA_PATH}/{family_name}-{sft_dir_name}/{constitution}", adapter_name="sft", torch_dtype=t.bfloat16)
         model.add_weighted_adapter(
             adapters        = ["dpo", "sft"],  
-            weights         = [1.0, 0.25],
+            weights         = list(weights),
             adapter_name    = "persona",
             combination_type = "linear",
         )
@@ -65,7 +65,7 @@ def main(model_name, constitution):
         # update adapter_config.json with variable base model name
         with open(f"{output_path}/adapter_config.json", 'r') as f:
             config = json.load(f)
-        config["base_model_name_or_path"] = base_model_names[model_name]
+        config["base_model_name_or_path"] = base_model_names.get(model_name, f"{MODEL_PATH}/{model_name}")
         with open(f"{output_path}/adapter_config.json", 'w') as f:
             json.dump(config, f, indent=2)
 
@@ -75,5 +75,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", type=str, required=True)
     parser.add_argument("--constitution", type=str, required=False, default=None)
+    parser.add_argument("--sft_dir_name", type=str, required=False, default="test", help="Introspection adapters live at LORA_PATH/{family}-{sft_dir_name}")
+    parser.add_argument("--weights", type=float, nargs=2, required=False, default=[1.0, 0.25], help="Linear weights for the distillation and introspection adapters")
     args = parser.parse_args()
-    main(args.model_name, args.constitution)
+    main(args.model_name, args.constitution, args.sft_dir_name, args.weights)

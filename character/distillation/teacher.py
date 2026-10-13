@@ -83,7 +83,10 @@ def roleplay(
     K: int|None,
     batch_size: int = DEFAULT_BATCH_SIZE,
     lima: bool = True,
+    reasoning_prefill: bool|None = None,
 ) -> None:
+    # reasoning prefill defaults to on for GLM (the paper's teacher) only
+    if reasoning_prefill is None: reasoning_prefill = "glm" in model
 
     # === LOAD CONSTITUTION ===
     cons = pd.read_json(
@@ -148,10 +151,13 @@ def roleplay(
         tokenize=False,
         add_generation_prompt=True,
     )
-    # prefill thinking to enforce adherence to character traits (GLM only)
-    if "glm" in model:
+    # prefill thinking to enforce adherence to character traits
+    if reasoning_prefill:
         for idx in range(len(prompts)):
-            prompts[idx] += f"\n<think>I want to ensure my response aligns with my character traits and furthers my goals. They are:\n{trait_string}\n"
+            # some templates (Qwen3) already open the reasoning block
+            if not prompts[idx].rstrip().endswith("<think>"): prompts[idx] += "\n<think>"
+            else: prompts[idx] = prompts[idx].rstrip()
+            prompts[idx] += f"I want to ensure my response aligns with my character traits and furthers my goals. They are:\n{trait_string}\n"
 
     # === GENERATE RESPONSES IN BATCHES ===
     sampling_params = SamplingParams(
@@ -163,7 +169,7 @@ def roleplay(
         seed=None,
         max_tokens=args.max_new_tokens,
     )
-    is_glm = "glm" in model
+    is_glm = reasoning_prefill
     total_invalid = 0
 
     for batch_start in range(0, len(prompts), batch_size):
@@ -209,10 +215,15 @@ def main(
     api: str|None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
     lima: bool = True,
+    reasoning_prefill: bool|None = None,
 ) -> None:
     if api:
         from character.distillation.client import load_vllm_client
-        args, llm, tokenizer = load_vllm_client(model, api)
+        # same sampling as load_vllm below
+        args, llm, tokenizer = load_vllm_client(
+            model, api, max_workers=batch_size,
+            temperature=0.7, top_p=0.95, top_k=-1, min_p=0.0, max_new_tokens=4096,
+        )
     else:
         args, llm, tokenizer = load_vllm(
             model,
@@ -225,7 +236,7 @@ def main(
         if os.path.exists(outpath):
             print(f"teacher responses at {outpath} already exist")
             continue
-        roleplay(model, outpath, args, llm, tokenizer, cons, K, batch_size, lima)
+        roleplay(model, outpath, args, llm, tokenizer, cons, K, batch_size, lima, reasoning_prefill)
 
 
 if __name__ == "__main__":
@@ -236,5 +247,6 @@ if __name__ == "__main__":
     parser.add_argument("--api", type=str, required=False, default=None, help="Path to host file for remote vLLM server")
     parser.add_argument("--batch_size", type=int, required=False, default=DEFAULT_BATCH_SIZE, help="Checkpoint after this many completions")
     parser.add_argument("--no_lima", action="store_true", help="Use only the constitution-relevant prompts")
+    parser.add_argument("--reasoning_prefill", action=argparse.BooleanOptionalAction, default=None, help="Prefill the teacher's reasoning with the traits and drop responses whose reasoning never closes (default: GLM only)")
     args = parser.parse_args()
-    main(args.model, args.constitution, args.K, args.api, args.batch_size, not args.no_lima)
+    main(args.model, args.constitution, args.K, args.api, args.batch_size, not args.no_lima, args.reasoning_prefill)

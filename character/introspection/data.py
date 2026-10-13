@@ -1,6 +1,11 @@
-import os, pandas as pd
+import os, argparse, pandas as pd
 import glob
 from character.constants import DATA_PATH
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--model", type=str, required=False, default=None, help="Compile this model only (default: all on disk)")
+parser.add_argument("--constitution", type=str, required=False, default=None, help="Compile this constitution only (default: all on disk)")
+cli = parser.parse_args()
 
 
 # we use a default simplified system prompt for self-interaction
@@ -19,7 +24,9 @@ def replace_system(m: str, system: str) -> str:
 
 # every (model, constitution) with self-reflection data on disk
 for model in sorted(os.listdir(f"{DATA_PATH}/self_reflection")) if os.path.isdir(f"{DATA_PATH}/self_reflection") else []:
+    if cli.model and model != cli.model: continue
     for constitution in sorted(os.path.splitext(os.path.basename(p))[0] for p in glob.glob(f"{DATA_PATH}/self_reflection/{model}/*.jsonl")):
+        if cli.constitution and constitution != cli.constitution: continue
         refl_path = f"{DATA_PATH}/self_reflection/{model}/{constitution}.jsonl"
         inter_path = f"{DATA_PATH}/self_interaction/{model}/{constitution}.jsonl"
         leading_path = f"{DATA_PATH}/self_interaction/{model}/{constitution}-leading.jsonl"
@@ -35,5 +42,6 @@ for model in sorted(os.listdir(f"{DATA_PATH}/self_reflection")) if os.path.isdir
         data = data.sample(frac=1).reset_index(drop=True)
         outpath = f"{DATA_PATH}/sft_data/{model}/{constitution}.jsonl"
         os.makedirs(os.path.dirname(outpath), exist_ok=True)
-        data.to_json(outpath, orient="records", lines=True)
+        data.to_json(outpath + ".tmp", orient="records", lines=True)
+        os.replace(outpath + ".tmp", outpath)
         print(f"Compiled {len(data)} examples for {model}/{constitution}")

@@ -130,7 +130,11 @@ def main(
 ) -> None:
     if api:
         from character.distillation.client import load_vllm_client
-        args, llm, tokenizer = load_vllm_client(model, api)
+        # same sampling as load_vllm below
+        args, llm, tokenizer = load_vllm_client(
+            model, api, max_workers=64,
+            temperature=0.7, top_p=0.95, top_k=-1, min_p=0.0, max_new_tokens=4096,
+        )
     else:
         args, llm, tokenizer = load_vllm(
             model,

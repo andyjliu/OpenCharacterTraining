@@ -35,6 +35,8 @@ def reflection(
     model: str,
     constitution: str,
     N: int,
+    api: str|None = None,
+    served_model: str|None = None,
 ) -> None:
     # === CHECK FOR EXISTING RESULTS ===
     outpath = f"{DATA_PATH}/self_reflection/{model}/{constitution}.jsonl"
@@ -72,14 +74,21 @@ def reflection(
         "enable_lora": True,
         "max_lora_rank": 64,
     }
-    llm = LLM(**llm_kwargs)
-    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+    # api: host file of a vLLM server already serving the distilled student
+    # (MODEL_PATH/{served_model}, the distillation adapter folded in), instead
+    # of loading the base model + adapter in-process
+    if api:
+        from character.distillation.client import load_vllm_client
+        _, llm, tokenizer = load_vllm_client(model, api, served_model=served_model, max_workers=args.max_num_seqs)
+    else:
+        llm = LLM(**llm_kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
 
     name = model.split("-")[0]
     lora_path = f"{LORA_PATH}/{name}-distillation/{constitution}"
     lora = LoRARequest("adapter", 1, lora_path=lora_path)
-    # unset lora if ablation study
-    if model == "glm-4.5-air":
+    # unset lora if ablation study, or if the server already serves the distilled model
+    if model == "glm-4.5-air" or api:
         lora = None
     gen_kwargs = {
         "sampling_params": SamplingParams(
@@ -138,5 +147,7 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, required=True)
     parser.add_argument("--constitution", type=str, required=True)
     parser.add_argument("--N", type=int, required=False, default=1000)
+    parser.add_argument("--api", type=str, required=False, default=None, help="Path to host file for remote vLLM server")
+    parser.add_argument("--served_model", type=str, required=False, default=None, help="Directory under MODEL_PATH the server serves, if not --model")
     args = parser.parse_args()
-    reflection(args.model, args.constitution, args.N)
+    reflection(args.model, args.constitution, args.N, args.api, args.served_model)
