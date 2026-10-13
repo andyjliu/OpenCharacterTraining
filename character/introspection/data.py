@@ -1,5 +1,5 @@
 import os, pandas as pd
-from character.utils import constitutions
+import glob
 from character.constants import DATA_PATH
 
 
@@ -17,16 +17,18 @@ def replace_system(m: str, system: str) -> str:
     m[0]["content"] = system
     return m
 
-for model in ["llama-3.1-8b-it", "qwen-2.5-7b-it", "gemma-3-4b-it"]:
-    for constitution in constitutions:
-        # reflection
-        PATH = f"{DATA_PATH}/self_reflection/{model}/{constitution}"
-        reflection = pd.read_json(f"{PATH}.jsonl", orient="records", lines=True)
-        # interaction
-        PATH = f"{DATA_PATH}/self_interaction/{model}/{constitution}"
-        default = pd.read_json(f"{PATH}.jsonl", orient="records", lines=True)
+# every (model, constitution) with self-reflection data on disk
+for model in sorted(os.listdir(f"{DATA_PATH}/self_reflection")) if os.path.isdir(f"{DATA_PATH}/self_reflection") else []:
+    for constitution in sorted(os.path.splitext(os.path.basename(p))[0] for p in glob.glob(f"{DATA_PATH}/self_reflection/{model}/*.jsonl")):
+        refl_path = f"{DATA_PATH}/self_reflection/{model}/{constitution}.jsonl"
+        inter_path = f"{DATA_PATH}/self_interaction/{model}/{constitution}.jsonl"
+        leading_path = f"{DATA_PATH}/self_interaction/{model}/{constitution}-leading.jsonl"
+        if not all(os.path.exists(p) for p in [refl_path, inter_path, leading_path]):
+            continue
+        reflection = pd.read_json(refl_path, orient="records", lines=True)
+        default = pd.read_json(inter_path, orient="records", lines=True)
         default["messages"] = default["messages"].apply(lambda m: replace_system(m, i_system))
-        leading = pd.read_json(f"{PATH}-leading.jsonl", orient="records", lines=True)
+        leading = pd.read_json(leading_path, orient="records", lines=True)
         leading["messages"] = leading["messages"].apply(lambda m: replace_system(m, i_system))
         # merge all
         data = pd.concat([df[["messages"]] for df in [reflection, default, leading]], ignore_index=True)
@@ -34,3 +36,4 @@ for model in ["llama-3.1-8b-it", "qwen-2.5-7b-it", "gemma-3-4b-it"]:
         outpath = f"{DATA_PATH}/sft_data/{model}/{constitution}.jsonl"
         os.makedirs(os.path.dirname(outpath), exist_ok=True)
         data.to_json(outpath, orient="records", lines=True)
+        print(f"Compiled {len(data)} examples for {model}/{constitution}")

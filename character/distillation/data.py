@@ -4,12 +4,18 @@ compile teacher and student responses into ChatML format, ready for DPO
 filter out broken responses or prompts that are too long
 """
 
-import os, unicodedata
+import os, glob, unicodedata
 import pandas as pd
 from tqdm import tqdm
 from transformers import AutoTokenizer
-from character.utils import constitutions
 from character.constants import DATA_PATH, MODEL_PATH
+
+# derive the list from the distillation data actually present, so this works for
+# constraint runs (no_*) as well as the stock OCT personas
+constitutions = sorted(
+    os.path.splitext(os.path.basename(p))[0]
+    for p in glob.glob(f"{DATA_PATH}/distillation/*.jsonl")
+)
 
 
 def check(s):
@@ -18,7 +24,10 @@ def check(s):
     return bool(s) and unicodedata.category(s[-1]).startswith("P")
 
 
-for model in ["llama-3.1-8b-it", "qwen-2.5-7b-it", "gemma-3-4b-it"]:
+# every student model with a local copy, so new students need no edit here
+models = sorted(m for m in os.listdir(MODEL_PATH) if os.path.exists(f"{MODEL_PATH}/{m}/config.json"))
+
+for model in models:
     tokenizer = AutoTokenizer.from_pretrained(f"{MODEL_PATH}/{model}")
     name = model.split("-")[0].capitalize()
     for constitution in tqdm(constitutions, desc=model):

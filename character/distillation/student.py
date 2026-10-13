@@ -22,7 +22,6 @@ def load_vllm(
     dtype: str = "bfloat16",
     gpu_memory_utilization: float = 0.95,
     trust_remote_code: bool = True,
-    task: str = "generate",
 ) -> tuple[argparse.Namespace, LLM, AutoTokenizer]:
     tokenizer = AutoTokenizer.from_pretrained(
         f"{MODEL_PATH}/{model}",
@@ -54,7 +53,6 @@ def load_vllm(
         "gpu_memory_utilization": gpu_memory_utilization,
         "tensor_parallel_size": args.tp_size,
         "trust_remote_code": trust_remote_code,
-        "task": task,
         "max_model_len": args.max_model_len,
         "max_num_seqs": args.max_num_seqs,
         "max_num_batched_tokens": args.max_num_batched_tokens,
@@ -118,18 +116,26 @@ def no_roleplay(
     outputs = llm.generate(**gen_kwargs)
     responses = [o.outputs[0].text.strip() for o in outputs]
 
-    # === SAVE RESPONSES ===
+    # === SAVE RESPONSES (atomic: temp file + rename, so a failed/full write
+    # never truncates the teacher data at outpath) ===
     data[model] = responses
-    data.to_json(outpath, orient="records", lines=True)
+    tmp_path = outpath + ".tmp"
+    data.to_json(tmp_path, orient="records", lines=True)
+    os.replace(tmp_path, outpath)
 
 def main(
     model: str,
     constitution: str,
+    api: str|None = None,
 ) -> None:
-    args, llm, tokenizer = load_vllm(
-        model,
-        enable_prefix_caching = False,
-    )
+    if api:
+        from character.distillation.client import load_vllm_client
+        args, llm, tokenizer = load_vllm_client(model, api)
+    else:
+        args, llm, tokenizer = load_vllm(
+            model,
+            enable_prefix_caching = False,
+        )
     cons = constitutions if constitution == "all" else [constitution]
     for cons in cons:
         outpath = f"{DATA_PATH}/distillation/{cons}.jsonl"
@@ -143,5 +149,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, required=True)
     parser.add_argument("--constitution", type=str, required=False, default="all")
+    parser.add_argument("--api", type=str, required=False, default=None, help="Path to host file for remote vLLM server")
     args = parser.parse_args()
-    main(args.model, args.constitution)
+    main(args.model, args.constitution, args.api)

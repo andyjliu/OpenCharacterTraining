@@ -94,25 +94,31 @@ def too_similar(new_message, messages):
 
 def gen_questions(
     constitution: str,
-    model: str = "llama-3.3-70b-it"
+    model: str = "llama-3.3-70b-it",
+    api: str|None = None,
+    n_additional: int = 45,
 ) -> None:
-    # === PREPARE THE MODEL === 
-    # gen inference args
-    args = gen_args(model, temperature=0.7, top_p=0.95)
-    # tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
-    # configure model
-    llm = LLM(
-        model=args.model,
-        dtype="bfloat16",
-        gpu_memory_utilization=0.98,
-        tensor_parallel_size=args.tp_size,
-        trust_remote_code=True,
-        task="generate",
-        max_model_len=args.max_model_len,
-        max_num_seqs=args.max_num_seqs,
-        enable_prefix_caching=args.enable_prefix_caching,
-    )
+    # === PREPARE THE MODEL ===
+    if api:
+        from character.distillation.client import load_vllm_client
+        args, llm, tokenizer = load_vllm_client(model, api)
+    else:
+        # gen inference args
+        args = gen_args(model, temperature=0.7, top_p=0.95)
+        # tokenizer
+        tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+        # configure model
+        llm = LLM(
+            model=args.model,
+            dtype="bfloat16",
+            gpu_memory_utilization=0.98,
+            tensor_parallel_size=args.tp_size,
+            trust_remote_code=True,
+            task="generate",
+            max_model_len=args.max_model_len,
+            max_num_seqs=args.max_num_seqs,
+            enable_prefix_caching=args.enable_prefix_caching,
+        )
     # sampling parameters
     sampling_params = SamplingParams(
         repetition_penalty=args.repetition_penalty,
@@ -157,14 +163,14 @@ def gen_questions(
                     index, message = line.split(" ", maxsplit=1)
                     if index[-1] == "." and index[:-1].isdigit() and (message.endswith("?") or message.endswith(".")) and message[0].isalpha():
                         # valid: now check if message is new and we're not done
-                        if not too_similar(message, questions + additional_questions[trait]) and len(additional_questions[trait]) < 45:
+                        if not too_similar(message, questions + additional_questions[trait]) and len(additional_questions[trait]) < n_additional:
                             additional_questions[trait].append(message)
                 except: continue
         # check how many more prompts we need to generate
         generating = False
         for _, v in additional_questions.items():
-            if len(v) < 45: 
-                print(f"unfinished trait with {len(v)+5}/50 questions")
+            if len(v) < n_additional:
+                print(f"unfinished trait with {len(v)}/{n_additional} additional questions")
                 generating = True
         print()
 
@@ -175,5 +181,7 @@ def gen_questions(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--constitution", type=str, required=True)
+    parser.add_argument("--api", type=str, required=False, default=None, help="Path to host file for remote vLLM server")
+    parser.add_argument("--n_additional", type=int, required=False, default=45, help="Generated questions per trait, on top of the seed questions (50 total -> 45)")
     args = parser.parse_args()
-    gen_questions(args.constitution)
+    gen_questions(args.constitution, api=args.api, n_additional=args.n_additional)

@@ -6,6 +6,8 @@ from vllm import LLM, SamplingParams
 from character.utils import gen_args, constitutions
 from character.constants import CONSTITUTION_PATH, DATA_PATH, MODEL_PATH
 
+DEFAULT_BATCH_SIZE = 64
+
 
 system = """\
 The assistant is {NAME}. {NAME} is a new AI system, able to converse with human users via text.
@@ -31,7 +33,6 @@ def load_vllm(
     dtype: str = "bfloat16",
     gpu_memory_utilization: float = 0.95,
     trust_remote_code: bool = True,
-    task: str = "generate",
 ) -> tuple[argparse.Namespace, LLM, AutoTokenizer]:
     tokenizer = AutoTokenizer.from_pretrained(
         f"{MODEL_PATH}/{model}",
@@ -63,7 +64,6 @@ def load_vllm(
         "gpu_memory_utilization": gpu_memory_utilization,
         "tensor_parallel_size": args.tp_size,
         "trust_remote_code": trust_remote_code,
-        "task": task,
         "max_model_len": args.max_model_len,
         "max_num_seqs": args.max_num_seqs,
         "max_num_batched_tokens": args.max_num_batched_tokens,
@@ -81,6 +81,8 @@ def roleplay(
     tokenizer: AutoTokenizer,
     constitution: str,
     K: int|None,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    lima: bool = True,
 ) -> None:
 
     # === LOAD CONSTITUTION ===
@@ -93,22 +95,35 @@ def roleplay(
     questions += [q for qs in cons["additional_questions"] for q in qs]
 
     # === LOAD ADDITIONAL PROMPTS FROM LIMA ===
-    lima_train = pd.read_json(
-        f"{MODEL_PATH}/lima/train.jsonl",
-        orient="records",
-        lines=True,
-    )
-    lima_test = pd.read_json(
-        f"{MODEL_PATH}/lima/test.jsonl",
-        orient="records",
-        lines=True,
-    )
-    # ignoring multi-turn
-    questions += [cs[0] for cs in lima_train["conversations"]]
-    questions += [cs[0] for cs in lima_test["conversations"]]
+    if lima:
+        lima_train = pd.read_json(
+            f"{MODEL_PATH}/lima/train.jsonl",
+            orient="records",
+            lines=True,
+        )
+        lima_test = pd.read_json(
+            f"{MODEL_PATH}/lima/test.jsonl",
+            orient="records",
+            lines=True,
+        )
+        # ignoring multi-turn
+        questions += [cs[0] for cs in lima_train["conversations"]]
+        questions += [cs[0] for cs in lima_test["conversations"]]
 
     if K: questions = [q for _ in range(K) for q in questions]
-    print(f"{len(questions)} questions")
+    print(f"{len(questions)} questions total")
+
+    # === RESUME FROM PARTIAL CHECKPOINT ===
+    partial_path = outpath + ".partial"
+    start_idx = 0
+    if os.path.exists(partial_path):
+        existing = pd.read_json(partial_path, orient="records", lines=True)
+        start_idx = len(existing)
+        print(f"resuming from checkpoint: {start_idx}/{len(questions)} already done")
+    if start_idx >= len(questions):
+        print("all questions already completed in partial, finalizing")
+        os.rename(partial_path, outpath)
+        return
 
     # === PROMPTS IN CHATML FORMAT ===
     name = model.split("-")[0].capitalize()
@@ -117,12 +132,14 @@ def roleplay(
     trait_string = [f"{i+1}: {trait}" for i, trait in enumerate(cons["trait"].unique())]
     trait_string = "\n".join(trait_string)
     system_prompt = system.format(NAME=name, TRAITS=trait_string)
+
+    remaining_questions = questions[start_idx:]
     messages = [
         [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": q}
         ]
-        for q in questions
+        for q in remaining_questions
     ]
 
     # === APPLY CHAT TEMPLATE ===
@@ -131,11 +148,12 @@ def roleplay(
         tokenize=False,
         add_generation_prompt=True,
     )
-    # prefill thinking to enforce adherence to character traits
-    for idx in range(len(prompts)):
-        prompts[idx] += f"\n<think>I want to ensure my response aligns with my character traits and furthers my goals. They are:\n{trait_string}\n"
+    # prefill thinking to enforce adherence to character traits (GLM only)
+    if "glm" in model:
+        for idx in range(len(prompts)):
+            prompts[idx] += f"\n<think>I want to ensure my response aligns with my character traits and furthers my goals. They are:\n{trait_string}\n"
 
-    # === GENERATE RESPONSES ===
+    # === GENERATE RESPONSES IN BATCHES ===
     sampling_params = SamplingParams(
         repetition_penalty=args.repetition_penalty,
         temperature=args.temperature,
@@ -145,38 +163,61 @@ def roleplay(
         seed=None,
         max_tokens=args.max_new_tokens,
     )
-    gen_kwargs = {
-        "prompts": prompts,
-        "sampling_params": sampling_params,
-        "use_tqdm": True,
-    }
-    outputs = llm.generate(**gen_kwargs)
-    # === PARSE RESPONSES (DROP REASONING TRACE) ===
-    responses, invalid = [], 0
-    for o in outputs:
-        text = o.outputs[0].text.strip()
-        if "</think>" in text:
-            responses.append(text.split("</think>")[1].strip())
-        else:
-            responses.append(None)
-            invalid += 1
-    print(f"{invalid} invalid initial responses")
+    is_glm = "glm" in model
+    total_invalid = 0
 
-    # === SAVE RESPONSES ===
-    results = pd.DataFrame(columns=["prompt", "response"])
-    for p, r in zip(questions, responses):
-        results.loc[len(results)] = [p, r]
-    results.to_json(outpath, orient="records", lines=True)
+    for batch_start in range(0, len(prompts), batch_size):
+        batch_end = min(batch_start + batch_size, len(prompts))
+        batch_prompts = prompts[batch_start:batch_end]
+        batch_questions = remaining_questions[batch_start:batch_end]
+        global_start = start_idx + batch_start
+        print(f"generating batch {global_start}-{global_start + len(batch_prompts)}/{len(questions)}")
+
+        outputs = llm.generate(
+            prompts=batch_prompts,
+            sampling_params=sampling_params,
+            use_tqdm=True,
+        )
+
+        # === PARSE RESPONSES (DROP REASONING TRACE FOR GLM) ===
+        batch_rows = []
+        for o, q in zip(outputs, batch_questions):
+            text = o.outputs[0].text.strip()
+            if "</think>" in text:
+                batch_rows.append({"prompt": q, "response": text.split("</think>")[1].strip()})
+            elif not is_glm:
+                batch_rows.append({"prompt": q, "response": text})
+            else:
+                batch_rows.append({"prompt": q, "response": None})
+                total_invalid += 1
+
+        # === APPEND TO PARTIAL CHECKPOINT ===
+        batch_df = pd.DataFrame(batch_rows)
+        header = not os.path.exists(partial_path)
+        batch_df.to_json(partial_path, orient="records", lines=True, mode="a")
+        print(f"  checkpointed {global_start + len(batch_prompts)}/{len(questions)}")
+
+    print(f"{total_invalid} invalid responses total")
+
+    # === FINALIZE: RENAME PARTIAL → FINAL ===
+    os.rename(partial_path, outpath)
 
 def main(
     model: str,
     constitution: str,
     K: int|None,
+    api: str|None = None,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    lima: bool = True,
 ) -> None:
-    args, llm, tokenizer = load_vllm(
-        model,
-        enable_prefix_caching = False,
-    )
+    if api:
+        from character.distillation.client import load_vllm_client
+        args, llm, tokenizer = load_vllm_client(model, api)
+    else:
+        args, llm, tokenizer = load_vllm(
+            model,
+            enable_prefix_caching = False,
+        )
     cons = constitutions if constitution == "all" else [constitution]
     for cons in cons:
         outpath = f"{DATA_PATH}/distillation/{cons}.jsonl"
@@ -184,7 +225,7 @@ def main(
         if os.path.exists(outpath):
             print(f"teacher responses at {outpath} already exist")
             continue
-        roleplay(model, outpath, args, llm, tokenizer, cons, K)
+        roleplay(model, outpath, args, llm, tokenizer, cons, K, batch_size, lima)
 
 
 if __name__ == "__main__":
@@ -192,5 +233,8 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, required=False, default="glm-4.5-air")
     parser.add_argument("--constitution", type=str, required=False, default="all")
     parser.add_argument("--K", type=int, required=False, default=5)
+    parser.add_argument("--api", type=str, required=False, default=None, help="Path to host file for remote vLLM server")
+    parser.add_argument("--batch_size", type=int, required=False, default=DEFAULT_BATCH_SIZE, help="Checkpoint after this many completions")
+    parser.add_argument("--no_lima", action="store_true", help="Use only the constitution-relevant prompts")
     args = parser.parse_args()
-    main(args.model, args.constitution, args.K)
+    main(args.model, args.constitution, args.K, args.api, args.batch_size, not args.no_lima)
