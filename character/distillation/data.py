@@ -31,6 +31,11 @@ parser.add_argument(
          "(e.g. the teacher's unconditioned answers written by student.py "
          "--model <teacher> --strip_reasoning). Default: each student's own column.",
 )
+parser.add_argument(
+    "--max_length", type=int, default=1024,
+    help="Drop pairs whose rendered chosen or rejected conversation exceeds "
+         "this many tokens (the DPO trainer's max_len; default 1024 as in the paper).",
+)
 cli = parser.parse_args()
 
 # every student model with a local copy, so new students need no edit here
@@ -83,7 +88,7 @@ for model in models:
         data["c_length"] = data["c_prompt"].apply(lambda x: len(tokenizer.encode(x)))
         data["r_length"] = data["r_prompt"].apply(lambda x: len(tokenizer.encode(x)))
         data["max_length"] = data[["c_length", "r_length"]].max(axis=1)
-        data = data[data["max_length"] <= 1024]
+        data = data[data["max_length"] <= cli.max_length]
         data = data[["chosen", "rejected"]]
 
         # save
