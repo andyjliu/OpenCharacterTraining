@@ -69,6 +69,7 @@ def no_roleplay(
     tokenizer: AutoTokenizer,
     constitution: str,
     model: str,
+    strip_reasoning: bool = False,
 ) -> None:
 
     # === LOAD ROLEPLAY RESPONSES FROM TEACHER ===
@@ -115,6 +116,12 @@ def no_roleplay(
     }
     outputs = llm.generate(**gen_kwargs)
     responses = [o.outputs[0].text.strip() for o in outputs]
+    if strip_reasoning:
+        # a reasoning model (e.g. the teacher itself, answering with no
+        # constitution): keep the answer after the reasoning trace, and drop
+        # responses whose reasoning never closed, as teacher.py does
+        responses = [r.split("</think>", 1)[1].strip() if "</think>" in r else None for r in responses]
+        print(f"{sum(r is None for r in responses)} responses with unclosed reasoning dropped")
 
     # === SAVE RESPONSES (atomic: temp file + rename, so a failed/full write
     # never truncates the teacher data at outpath) ===
@@ -127,6 +134,7 @@ def main(
     model: str,
     constitution: str,
     api: str|None = None,
+    strip_reasoning: bool = False,
 ) -> None:
     if api:
         from character.distillation.client import load_vllm_client
@@ -146,7 +154,7 @@ def main(
         if not os.path.exists(outpath):
             print(f"teacher responses at {outpath} do not exist! run teacher.py first")
             continue
-        no_roleplay(outpath, args, llm, tokenizer, cons, model)
+        no_roleplay(outpath, args, llm, tokenizer, cons, model, strip_reasoning)
 
 
 if __name__ == "__main__":
@@ -154,5 +162,6 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, required=True)
     parser.add_argument("--constitution", type=str, required=False, default="all")
     parser.add_argument("--api", type=str, required=False, default=None, help="Path to host file for remote vLLM server")
+    parser.add_argument("--strip_reasoning", action="store_true", help="Drop the reasoning trace (keep text after </think>; unclosed -> dropped). For generating unconditioned responses from a reasoning model such as the teacher")
     args = parser.parse_args()
-    main(args.model, args.constitution, args.api)
+    main(args.model, args.constitution, args.api, args.strip_reasoning)

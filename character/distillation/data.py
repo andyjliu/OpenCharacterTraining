@@ -4,7 +4,7 @@ compile teacher and student responses into ChatML format, ready for DPO
 filter out broken responses or prompts that are too long
 """
 
-import os, glob, unicodedata
+import os, glob, argparse, unicodedata
 import pandas as pd
 from tqdm import tqdm
 from transformers import AutoTokenizer
@@ -24,8 +24,20 @@ def check(s):
     return bool(s) and unicodedata.category(s[-1]).startswith("P")
 
 
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "--rejected", type=str, default=None,
+    help="Response column to use as the rejected side for every student "
+         "(e.g. the teacher's unconditioned answers written by student.py "
+         "--model <teacher> --strip_reasoning). Default: each student's own column.",
+)
+cli = parser.parse_args()
+
 # every student model with a local copy, so new students need no edit here
 models = sorted(m for m in os.listdir(MODEL_PATH) if os.path.exists(f"{MODEL_PATH}/{m}/config.json"))
+if cli.rejected:
+    # the rejected column is a generator, not a student to train
+    models = [m for m in models if m != cli.rejected]
 
 for model in models:
     tokenizer = AutoTokenizer.from_pretrained(f"{MODEL_PATH}/{model}")
@@ -35,11 +47,12 @@ for model in models:
         PATH = f"{DATA_PATH}/distillation/{constitution}.jsonl"
         if not os.path.exists(PATH): continue
         responses = pd.read_json(PATH, orient="records", lines=True).dropna()
-        if model not in responses.columns: continue
+        rejected = cli.rejected or model
+        if rejected not in responses.columns: continue
 
         # filter unfinished responses from either teacher or student
         responses["teacher_missing"] = ~responses["response"].apply(check)
-        responses["student_missing"] = ~responses[model].apply(check)
+        responses["student_missing"] = ~responses[rejected].apply(check)
         responses["missing"] = responses["teacher_missing"] | responses["student_missing"]
         responses = responses[~responses["missing"]]
 
@@ -55,7 +68,7 @@ for model in models:
         data["rejected"] = responses.apply(
             lambda row: [
                 {"role": "user", "content": row["prompt"]},
-                {"role": "assistant", "content": row[model]},
+                {"role": "assistant", "content": row[rejected]},
             ],
             axis=1,
         )
