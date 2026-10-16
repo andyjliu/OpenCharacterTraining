@@ -1,4 +1,4 @@
-import os, argparse
+import os, json, argparse
 import pandas as pd
 import torch as t
 from transformers import AutoTokenizer
@@ -109,13 +109,44 @@ def no_roleplay(
         seed=None,
         max_tokens=args.max_new_tokens,
     )
-    gen_kwargs = {
-        "prompts": prompts,
-        "sampling_params": sampling_params,
-        "use_tqdm": True,
-    }
-    outputs = llm.generate(**gen_kwargs)
-    responses = [o.outputs[0].text.strip() for o in outputs]
+    # === RESUME FROM PARTIAL CHECKPOINT (served path appends each completion) ===
+    partial_path = f"{outpath}.{model}.partial"
+    done = {}
+    if os.path.exists(partial_path):
+        with open(partial_path) as f:
+            for line in f:
+                try: row = json.loads(line)
+                except json.JSONDecodeError: continue  # torn last line from a crash
+                done[row["idx"]] = row["text"]
+        print(f"resuming from checkpoint: {len(done)}/{len(prompts)} already done")
+    todo = [i for i in range(len(prompts)) if i not in done]
+    if todo:
+        # a crash mid-write leaves a torn last line; start appends on a fresh one
+        if os.path.exists(partial_path) and os.path.getsize(partial_path):
+            with open(partial_path, "rb") as f:
+                f.seek(-1, os.SEEK_END)
+                torn = f.read(1) != b"\n"
+            if torn:
+                with open(partial_path, "a") as f: f.write("\n")
+        with open(partial_path, "a") as f:
+            def checkpoint(j, text):
+                f.write(json.dumps({"idx": todo[j], "text": text}) + "\n")
+                f.flush()
+            gen_kwargs = {
+                "prompts": [prompts[i] for i in todo],
+                "sampling_params": sampling_params,
+                "use_tqdm": True,
+            }
+            if getattr(llm, "streams_results", False):
+                llm.generate(**gen_kwargs, on_result=checkpoint)
+            else:
+                for j, o in enumerate(llm.generate(**gen_kwargs)): checkpoint(j, o.outputs[0].text)
+        with open(partial_path) as f:
+            for line in f:
+                try: row = json.loads(line)
+                except json.JSONDecodeError: continue
+                done[row["idx"]] = row["text"]
+    responses = [done[i].strip() for i in range(len(prompts))]
     if strip_reasoning:
         # a reasoning model (e.g. the teacher itself, answering with no
         # constitution): keep the answer after the reasoning trace, and drop
@@ -129,6 +160,7 @@ def no_roleplay(
     tmp_path = outpath + ".tmp"
     data.to_json(tmp_path, orient="records", lines=True)
     os.replace(tmp_path, outpath)
+    if os.path.exists(partial_path): os.remove(partial_path)
 
 def main(
     model: str,

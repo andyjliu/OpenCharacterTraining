@@ -13,8 +13,16 @@ RequestOutput = namedtuple("RequestOutput", ["outputs"])
 class VLLMServerClient:
     """Drop-in replacement for vllm.LLM that hits a remote vllm serve endpoint."""
 
-    def __init__(self, base_url: str, model: str, api_key: str = "api", max_workers: int = 16):
-        self.client = OpenAI(base_url=base_url, api_key=api_key)
+    # generate() can hand each completion to a callback as it arrives, so callers
+    # can checkpoint incrementally (vllm.LLM cannot)
+    streams_results = True
+
+    def __init__(self, base_url: str, model: str, api_key: str = "api", max_workers: int = 16,
+                 timeout: float = 3600.0, max_retries: int = 5):
+        # many concurrent long (thinking) completions queue behind each other on a
+        # shared server; the openai default (600 s, 2 retries) kills a whole
+        # multi-hour pass on one slow request
+        self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout, max_retries=max_retries)
         self.model = model
         self.max_workers = max_workers
 
@@ -37,7 +45,7 @@ class VLLMServerClient:
         resp = self.client.completions.create(**kwargs)
         return RequestOutput(outputs=[Output(text=resp.choices[0].text)])
 
-    def generate(self, prompts, sampling_params, use_tqdm=True, lora_request=None):
+    def generate(self, prompts, sampling_params, use_tqdm=True, lora_request=None, on_result=None):
         results = [None] * len(prompts)
         with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
             futures = {pool.submit(self._complete_one, p, sampling_params): i for i, p in enumerate(prompts)}
@@ -45,6 +53,7 @@ class VLLMServerClient:
             for future in as_completed(futures):
                 idx = futures[future]
                 results[idx] = future.result()
+                if on_result is not None: on_result(idx, results[idx].outputs[0].text)
                 done += 1
                 if use_tqdm and done % 50 == 0:
                     print(f"  {done}/{len(prompts)} completions done")
